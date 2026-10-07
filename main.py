@@ -21,7 +21,7 @@ except ImportError:
     psutil = None
 
 # ----------------- CONFIGURATION --------------
-BOT_TOKEN = '8330689394:AAHR064_FrDMnDGhFOnWxowJydANDClZ9mY'  # আপনার টেলিগ্রাম বট টোকেন
+BOT_TOKEN = '8891741635:AAGTbZndObi_TpYeQwtQmfF8-4L4NMu-dLM'  # আপনার টেলিগ্রাম বট টোকেন
 BASE_DIR = 'projects'              
 META_FILE = 'projects_meta.json'   
 AUTH_CONFIG_FILE = 'auth_config.json'  # পিন ও ভেরিফাইড ইউজারদের ডাটাবেজ ফাইল
