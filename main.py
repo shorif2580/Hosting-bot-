@@ -9,12 +9,13 @@ import re
 import shutil
 import socket
 import secrets
+import shlex
 import requests
 import urllib3
 import telebot
 from telebot import types
 
-# psutil library for advanced hardware reading (Safe-catch for Termux)
+# psutil library for advanced hardware reading
 try:
     import psutil
 except ImportError:
@@ -24,8 +25,9 @@ except ImportError:
 BOT_TOKEN = '8891741635:AAGTbZndObi_TpYeQwtQmfF8-4L4NMu-dLM'  # আপনার টেলিগ্রাম বট টোকেন
 BASE_DIR = 'projects'              
 META_FILE = 'projects_meta.json'   
-AUTH_CONFIG_FILE = 'auth_config.json'  # পিন ও ভেরিফাইড ইউজারদের ডাটাবেজ ফাইল
+AUTH_CONFIG_FILE = 'auth_config.json'  # পিন ফাইল
 DEFAULT_PIN = 'HMSI2580'               # ডিফল্ট পিন
+SESSION_TIMEOUT = 600                  # ১০ মিনিট (সেকেন্ডে)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 os.makedirs(BASE_DIR, exist_ok=True)
@@ -33,6 +35,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 # System and Process Tracking Databases
 active_processes = {}
 user_states = {}
+user_activity = {}  # ১০ মিনিট ট্র্যাকিংয়ের জন্য
 
 ASCII_LOGO = """
 ╔═══════════════════════════════════════╗
@@ -58,19 +61,30 @@ def save_auth_config(config):
 
 def is_authorized(chat_id):
     config = load_auth_config()
-    return chat_id in config.get("authorized_users", [])
+    if chat_id in config.get("authorized_users", []):
+        # ১০ মিনিটের সেশন টাইমআউট চেক
+        last_active = user_activity.get(chat_id, 0)
+        if time.time() - last_active > SESSION_TIMEOUT:
+            deauthorize_user(chat_id)
+            return False
+        user_activity[chat_id] = time.time()  # অ্যাক্টিভিটি টাইম আপডেট
+        return True
+    return False
 
 def authorize_user(chat_id):
     config = load_auth_config()
     if chat_id not in config.get("authorized_users", []):
         config.setdefault("authorized_users", []).append(chat_id)
         save_auth_config(config)
+    user_activity[chat_id] = time.time()
 
 def deauthorize_user(chat_id):
     config = load_auth_config()
     if chat_id in config.get("authorized_users", []):
         config["authorized_users"].remove(chat_id)
         save_auth_config(config)
+    if chat_id in user_activity:
+        del user_activity[chat_id]
 
 def update_pin(new_pin):
     config = load_auth_config()
@@ -232,12 +246,11 @@ threading.Thread(target=bg_project_monitor, daemon=True).start()
 # ----------------- ADVANCED PROCESS MANAGER -----------------
 def run_project_process(proj_id, proj_data):
     proj_dir = proj_data['dir']
-    main_file = proj_data['main_file']
     log_file_path = os.path.join(proj_dir, 'output.log')
     
     if os.path.exists(log_file_path):
         try: os.remove(log_file_path)
-        except: pass
+        except Exception: pass
         
     log_file = open(log_file_path, 'w', encoding='utf-8')
     
@@ -246,17 +259,23 @@ def run_project_process(proj_id, proj_data):
     if proj_id in meta:
         meta[proj_id]['port'] = port
         save_meta(meta)
-            
-    if main_file.endswith('.py'):
-        cmd = [sys.executable, '-u', main_file]
-    elif main_file.endswith('.js'):
-        cmd = ['node', main_file]
-    elif main_file.endswith('.sh'):
-        cmd = ['bash', main_file]
-    elif main_file.endswith(('.html', '.htm')):
-        cmd = [sys.executable, '-u', '-m', 'http.server', str(port)]
+    
+    # ম্যানুয়াল স্টার্টআপ কমান্ড থাকলে তা ব্যবহার করা হবে
+    custom_cmd = proj_data.get('custom_cmd', '').strip()
+    if custom_cmd:
+        cmd = shlex.split(custom_cmd)
     else:
-        cmd = [sys.executable, '-u', main_file]
+        main_file = proj_data.get('main_file', 'main.py')
+        if main_file.endswith('.py'):
+            cmd = [sys.executable, '-u', main_file]
+        elif main_file.endswith('.js'):
+            cmd = ['node', main_file]
+        elif main_file.endswith('.sh'):
+            cmd = ['bash', main_file]
+        elif main_file.endswith(('.html', '.htm')):
+            cmd = [sys.executable, '-u', '-m', 'http.server', str(port)]
+        else:
+            cmd = [sys.executable, '-u', main_file]
     
     env = os.environ.copy()
     env['PORT'] = str(port)
@@ -300,9 +319,9 @@ def stop_project_process(proj_id):
     if proj_id in active_processes:
         proc_info = active_processes[proj_id]
         try: proc_info['process'].terminate()
-        except: pass
+        except Exception: pass
         try: proc_info['log_file'].close()
-        except: pass
+        except Exception: pass
         del active_processes[proj_id]
 
 def get_project_status(proj_id, proj_data):
@@ -389,14 +408,15 @@ def get_menu_keyboard():
 def send_welcome(message):
     chat_id = message.chat.id
     
-    # পিন ভেরিফিকেশন গার্ড
+    # পিন ভেরিফিকেশন গার্ড (১০ মিনিটের মেয়াদ উত্তীর্ণ হলেও পিন চাইবে)
     if not is_authorized(chat_id):
         user_states[chat_id] = "AWAITING_PIN"
         bot_send_message(
             chat_id,
             "🔒 *ACCESS LOCKED (প্রাইভেট সার্ভার)*\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "এই হোস্টিং বটটি কন্ট্রোল করতে আপনার **গোপন PIN** লিখুন:",
+            "এই হোস্টিং বটটি কন্ট্রোল করতে আপনার **গোপন PIN** লিখুন:\n"
+            "_(সঠিক পিন দিলে সাথে সাথেই মেসেজ অটো-ডিলিট হবে)_",
             parse_mode="Markdown",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -410,6 +430,7 @@ def send_welcome(message):
         f"╚═══════════════════════════════════╝\n\n"
         f"🛰️ যেকোনো অ্যাকাউন্ট থেকে ফুল কন্ট্রোল সক্ষম।\n\n"
         f"📁 *Total Hosted Projects:*  🟢 `{len(meta)}` Active\n"
+        f"⏳ *Auto Lock Timeout:*  ⏱️ 10 Minutes\n"
         f"🔑 *Security State:*  🔓 Authenticated\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{get_server_stats()}"
@@ -429,7 +450,7 @@ def handle_navigation_buttons(message):
     
     if not is_authorized(chat_id):
         user_states[chat_id] = "AWAITING_PIN"
-        bot_send_message(chat_id, "🔒 অনুগ্রহ করে আগে সঠিক **PIN** দিন:", parse_mode="Markdown")
+        bot_send_message(chat_id, "🔒 সেশন শেষ অথবা লক করা। অনুগ্রহ করে **PIN** দিন:", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
         return
         
     text = message.text
@@ -441,7 +462,8 @@ def handle_navigation_buttons(message):
             "╔═══════════════════════════════╗\n"
             "║   👑 *VIP SANDBOX DEPLOYER* 👑   ║\n"
             "╚═══════════════════════════════╝\n\n"
-            "📥 আপনার প্রজেক্টের `.zip` ফাইলটি আপলোড করুন।",
+            "📥 আপনার প্রজেক্টের `.zip` ফাইলটি আপলোড করুন।\n"
+            "💡 _(ভেতরে `requirements.txt` থাকলে তা স্বয়ংক্রিয়ভাবে ইনস্টল হবে)_",
             parse_mode="Markdown"
         )
     elif text == "📁 My Dashboard":
@@ -467,10 +489,10 @@ def handle_navigation_buttons(message):
             "╔═══════════════════════════════╗\n"
             "║   💡 *VIP OPERATIONAL GUIDE* 💡   ║\n"
             "╚═══════════════════════════════╝\n\n"
-            "🚀 *Deployment:* 'Deploy New' ক্লিক করে কোড `.zip` আপলোড করুন।\n"
-            "🤖 *Auto React Bot:* গ্রুপে যোগ করে লং-পোলিং দিয়ে স্বয়ংক্রিয় রিঅ্যাক্ট দিতে পারবে।\n"
-            "📱 *App Store Bot:* `.apk` ফাইল আপলোড করে ইউজারের কাছে সহজে ডেলিভারি করা যাবে।\n"
-            "🔐 *PIN Security:* যেকোনো নতুন ফোন/আইডি থেকে পিন দিলেই সব প্রোজেক্ট কন্ট্রোল করা যাবে।"
+            "🚀 *Deployment:* Zip ফাইল দিলে `requirements.txt` অটো ইনস্টল হবে।\n"
+            "⌨️ *Startup Command:* ম্যানুয়াল কমান্ড (যেমন `python bot.py`) সেট করতে পারবেন।\n"
+            "⏱️ *10 Min Lock:* ১০ মিনিট নিষ্ক্রিয় থাকলে বট নিজে থেকেই লক হয়ে যাবে।\n"
+            "🗑️ *PIN Auto Delete:* সঠিক পিন দেওয়ার পর মেসেজ নিজে থেকেই ডিলিট হয়ে যাবে।"
         )
         bot_send_message(chat_id, help_text, parse_mode="Markdown")
 
@@ -481,9 +503,11 @@ def callback_listener(call):
     chat_id = call.message.chat.id
     data = call.data
     
-    # গ্লোবাল পিন চেক
+    # গ্লোবাল পিন ও ১০ মিনিট সেশন চেক
     if not is_authorized(chat_id):
-        bot.answer_callback_query(call.id, "🔒 এক্সেস ডিনাইড! আগে পিন ভেরিফাই করুন।", show_alert=True)
+        bot.answer_callback_query(call.id, "🔒 সেশনের মেয়াদ শেষ (১০ মিনিট অতিক্রান্ত)। পুনরায় PIN দিন।", show_alert=True)
+        user_states[chat_id] = "AWAITING_PIN"
+        bot_send_message(chat_id, "🔒 সেশনের মেয়াদ শেষ! দয়া করে আপনার **PIN** দিন:", parse_mode="Markdown")
         return
     
     if data == "btn_deploy":
@@ -505,6 +529,7 @@ def callback_listener(call):
             filename = meta[proj_id]['files'].get(file_idx)
             if filename:
                 meta[proj_id]['main_file'] = filename
+                meta[proj_id]['custom_cmd'] = ''  # কাস্টম কমান্ড ক্লিয়ার
                 save_meta(meta)
                 
                 play_vip_loading(chat_id, call.message.message_id, "PREPARING DEPLOYMENT SANDBOX")
@@ -514,6 +539,21 @@ def callback_listener(call):
                     show_project_dashboard(chat_id, proj_id, call.message.message_id, "✅ Project Deployed & Started!")
                 else:
                     show_project_dashboard(chat_id, proj_id, call.message.message_id, f"❌ Failed: {err_msg}")
+
+    elif data.startswith("set_custom_cmd:"):
+        _, proj_id = data.split(":")
+        user_states[chat_id] = f"AWAITING_CUSTOM_CMD:{proj_id}"
+        bot_send_message(
+            chat_id,
+            "⌨️ *ম্যানুয়াল স্টার্টআপ কমান্ড লিখুন*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "আপনার প্রজেক্ট চালু করার কমান্ডটি লিখে মেসেজ পাঠান।\n\n"
+            "উদাহরণ:\n"
+            "• `python bot.py`\n"
+            "• `python3 main.py`\n"
+            "• `node index.js`",
+            parse_mode="Markdown"
+        )
                 
     elif data.startswith("proj_view:"):
         _, proj_id = data.split(":")
@@ -673,7 +713,7 @@ def callback_listener(call):
         _, proj_id, module_name = data.split(":")
         meta = load_meta()
         if proj_id in meta:
-            main_file = meta[proj_id]['main_file']
+            main_file = meta[proj_id].get('main_file', '')
             is_node = main_file.endswith('.js')
             
             installer_name = "npm" if is_node else "pip"
@@ -780,11 +820,22 @@ def handle_incoming_documents(message):
             'name': file_name.replace('.zip', ''),
             'dir': proj_dir,
             'main_file': '',
+            'custom_cmd': '',
             'chat_id': chat_id,
             'auto_restart': False,
             'files': {}
         }
         save_meta(meta)
+        
+        # ⚠️ REQUIREMENTS.TXT AUTO-DETECT & INSTALL
+        req_path = os.path.join(proj_dir, 'requirements.txt')
+        if os.path.exists(req_path):
+            req_msg = bot_send_message(chat_id, "📦 `requirements.txt` detected! Installing dependencies in background...")
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "-r", req_path], timeout=180)
+                bot_edit_message("✅ `requirements.txt` dependencies installed successfully!", chat_id, req_msg.message_id)
+            except Exception as req_err:
+                bot_edit_message(f"⚠️ Dependency installation warning: {str(req_err)}", chat_id, req_msg.message_id)
         
         files_map = update_project_files_map(proj_id, proj_dir)
         
@@ -804,24 +855,21 @@ def handle_incoming_documents(message):
         markup = types.InlineKeyboardMarkup(row_width=1)
         count = 0
         for idx, f in code_files:
-            if count >= 10:
+            if count >= 8:
                 break
             base = os.path.basename(f).lower()
             star = "⭐ " if base in PRIORITY_NAMES else "📄 "
             markup.add(types.InlineKeyboardButton(f"{star}{f}", callback_data=f"select_main:{proj_id}:{idx}"))
             count += 1
 
-        if count == 0:
-            for idx, f in files_map.items():
-                if count < 10:
-                    markup.add(types.InlineKeyboardButton(f"📄 {f}", callback_data=f"select_main:{proj_id}:{idx}"))
-                    count += 1
+        # ম্যানুয়াল স্টার্টআপ কমান্ড সেট করার বাটন
+        markup.add(types.InlineKeyboardButton("⌨️ Set Custom Startup Command", callback_data=f"set_custom_cmd:{proj_id}"))
             
         bot_delete_message(chat_id, status_msg.message_id)
         bot_send_message(
             chat_id,
             f"👑 *ARCHIVE EXTRACTED:* `{file_name}`\n\n"
-            f"Configure and pick the container's entry/executable point script:",
+            f"নিচের তালিকা থেকে স্ক্রিপ্ট সিলেক্ট করুন অথবা ম্যানুয়াল কমান্ড সেট করুন:",
             parse_mode="Markdown",
             reply_markup=markup
         )
@@ -837,12 +885,36 @@ def handle_incoming_text(message):
     # পিন ভেরিফিকেশন হ্যান্ডলার
     if not is_authorized(chat_id):
         if user_text == get_current_pin():
+            # ✅ সঠিক PIN: সাথে সাথে ইউজারের মেসেজ ডিলিট হবে যাতে কেউ পিন না দেখে
+            bot_delete_message(chat_id, message.message_id)
             authorize_user(chat_id)
             user_states[chat_id] = None
-            bot_send_message(chat_id, "✅ *PIN সঠিক! ফুল অ্যাডমিন এক্সেস দেওয়া হয়েছে।*", parse_mode="Markdown")
+            bot_send_message(chat_id, "✅ *PIN সঠিক! ফুল অ্যাডমিন এক্সেস দেওয়া হয়েছে।*\n_(আপনার PIN মেসেজটি নিরাপত্তার জন্য মুছে দেওয়া হয়েছে)_", parse_mode="Markdown")
             send_welcome(message)
         else:
+            # ❌ ভুল PIN: মেসেজ ডিলিট হবে না
             bot_send_message(chat_id, "❌ *ভুল PIN!* অনুগ্রহ করে সঠিক পিন লিখে পাঠান:", parse_mode="Markdown")
+        return
+
+    # ম্যানুয়াল স্টার্টআপ কমান্ড নেওয়ার হ্যান্ডলার
+    if state and state.startswith("AWAITING_CUSTOM_CMD:"):
+        _, proj_id = state.split(":")
+        user_states[chat_id] = None
+        
+        meta = load_meta()
+        if proj_id in meta:
+            meta[proj_id]['custom_cmd'] = user_text
+            meta[proj_id]['main_file'] = user_text
+            save_meta(meta)
+            
+            status_msg = bot_send_message(chat_id, f"⏳ Setting startup command: `{user_text}`...", parse_mode="Markdown")
+            success, err_msg = run_project_process(proj_id, meta[proj_id])
+            bot_delete_message(chat_id, status_msg.message_id)
+            
+            if success:
+                show_project_dashboard(chat_id, proj_id, None, "✅ Project Started with Custom Command!")
+            else:
+                show_project_dashboard(chat_id, proj_id, None, f"❌ Failed: {err_msg}")
         return
 
     # পিন পরিবর্তনের হ্যান্ডলার
@@ -853,6 +925,7 @@ def handle_incoming_text(message):
             
         update_pin(user_text)
         user_states[chat_id] = None
+        bot_delete_message(chat_id, message.message_id)  # নতুন পিনের মেসেজটিও ডিলিট
         bot_send_message(
             chat_id,
             f"✅ *PIN সফলভাবে পরিবর্তন করা হয়েছে!*\n\n"
@@ -905,6 +978,7 @@ def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
     auto_r_status = "🟢 Enabled" if proj_data.get('auto_restart') else "🔴 Disabled"
     port_allocated = proj_data.get('port', 'None')
     mem_usage = get_process_resource_usage(proj_id)
+    cmd_running = proj_data.get('custom_cmd') or proj_data.get('main_file')
 
     header = f"🌟 *{toast_msg}*" if toast_msg else "╔══════════════════════════╗\n║ ⚙️ *CONTAINER DASHBOARD* ⚙️ ║\n╚══════════════════════════╝"
     
@@ -912,7 +986,7 @@ def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
         f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📂 *Container Name:*  `{proj_data['name']}`\n"
-        f"🚀 *Main Process:*  `{proj_data['main_file']}`\n"
+        f"🚀 *Startup Command:*  `{cmd_running}`\n"
         f"📈 *State:*  {status}\n"
         f"⚙️ *PID Memory:*  `{mem_usage}`\n"
         f"🔌 *Allotted Port:*  `{port_allocated}`\n"
@@ -956,7 +1030,7 @@ def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
 
 def show_my_files(chat_id, message_id=None):
     meta = load_meta()
-    user_projects = meta  # মাস্টার মোড: পিনধারী ইউজার সব প্রজেক্ট নিয়ন্ত্রণ করতে পারবেন
+    user_projects = meta
     
     text = (
         f"╔═══════════════════════════════════╗\n"
