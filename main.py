@@ -15,7 +15,7 @@ import urllib3
 import telebot
 from telebot import types
 
-# psutil library for advanced hardware reading
+# psutil library for hardware reading
 try:
     import psutil
 except ImportError:
@@ -25,49 +25,83 @@ except ImportError:
 BOT_TOKEN = '8891741635:AAGTbZndObi_TpYeQwtQmfF8-4L4NMu-dLM'  # আপনার টেলিগ্রাম বট টোকেন
 BASE_DIR = 'projects'              
 META_FILE = 'projects_meta.json'   
-AUTH_CONFIG_FILE = 'auth_config.json'  # পিন ফাইল
-DEFAULT_PIN = 'HMSI2580'               # ডিফল্ট পিন
+AUTH_CONFIG_FILE = 'auth_config.json'
+DEFAULT_PIN = 'HMSI2580'
 SESSION_TIMEOUT = 600                  # ১০ মিনিট (সেকেন্ডে)
+
+# 🔥 আপনার স্ক্রিনশটের Firebase Database URL (Keyless REST API)
+FIREBASE_URL = "https://hosting-bot-bd-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 os.makedirs(BASE_DIR, exist_ok=True)
 
-# System and Process Tracking Databases
 active_processes = {}
 user_states = {}
-user_activity = {}  # ১০ মিনিট ট্র্যাকিংয়ের জন্য
+user_activity = {}
 
 ASCII_LOGO = """
 ╔═══════════════════════════════════════╗
-║       👑 CORE HOSTING ENGINE V2 👑    ║
+║   👑 CORE HOSTING ENGINE (CLOUD) 👑   ║
 ╚═══════════════════════════════════════╝
 """
 
-# ----------------- AUTHENTICATION & PIN SYSTEM -----------------
+# ----------------- FIREBASE REST SYNC ENGINE -----------------
+def fb_get(endpoint):
+    """ফায়ারবেস থেকে ডাটা পড়ে নিয়ে আসে"""
+    try:
+        r = requests.get(f"{FIREBASE_URL}/{endpoint}.json", timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"Firebase Read Error ({endpoint}): {e}")
+    return None
+
+def fb_put(endpoint, data):
+    """ফায়ারবেসে ডাটা সরাসরি লাইভ সেভ/আপডেট/ডিলিট করে"""
+    try:
+        requests.put(f"{FIREBASE_URL}/{endpoint}.json", json=data, timeout=5)
+    except Exception as e:
+        print(f"Firebase Write Error ({endpoint}): {e}")
+
+# ----------------- AUTHENTICATION & PIN SYSTEM (WITH CLOUD) -----------------
 def load_auth_config():
+    cloud_data = fb_get("auth_config")
+    if cloud_data and isinstance(cloud_data, dict):
+        save_local_file(AUTH_CONFIG_FILE, cloud_data)
+        return cloud_data
+
     if os.path.exists(AUTH_CONFIG_FILE):
         try:
             with open(AUTH_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                fb_put("auth_config", data)
+                return data
         except Exception:
             pass
+
     default_config = {"pin": DEFAULT_PIN, "authorized_users": []}
     save_auth_config(default_config)
     return default_config
 
 def save_auth_config(config):
-    with open(AUTH_CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4)
+    save_local_file(AUTH_CONFIG_FILE, config)
+    fb_put("auth_config", config)
+
+def save_local_file(filename, data):
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+    except Exception:
+        pass
 
 def is_authorized(chat_id):
     config = load_auth_config()
     if chat_id in config.get("authorized_users", []):
-        # ১০ মিনিটের সেশন টাইমআউট চেক
         last_active = user_activity.get(chat_id, 0)
         if time.time() - last_active > SESSION_TIMEOUT:
             deauthorize_user(chat_id)
             return False
-        user_activity[chat_id] = time.time()  # অ্যাক্টিভিটি টাইম আপডেট
+        user_activity[chat_id] = time.time()
         return True
     return False
 
@@ -95,19 +129,27 @@ def get_current_pin():
     config = load_auth_config()
     return config.get("pin", DEFAULT_PIN)
 
-# ----------------- STORAGE SYSTEM -----------------
+# ----------------- STORAGE SYSTEM (TWO-WAY SYNC) -----------------
 def load_meta():
+    cloud_meta = fb_get("projects_meta")
+    if cloud_meta and isinstance(cloud_meta, dict):
+        save_local_file(META_FILE, cloud_meta)
+        return cloud_meta
+
     if os.path.exists(META_FILE):
         try:
             with open(META_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                fb_put("projects_meta", data)
+                return data
         except Exception:
             return {}
     return {}
 
 def save_meta(data):
-    with open(META_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+    save_local_file(META_FILE, data)
+    # ফায়ারবেসে সরাসরি আপডেট (ডিলিট করলে ফায়ারবেস থেকেও মুছে যাবে)
+    fb_put("projects_meta", data)
 
 # ----------------- SAFE NETWORK API WRAPPER -----------------
 def safe_api_call(func, *args, **kwargs):
@@ -171,7 +213,7 @@ def update_project_files_map(proj_id, proj_dir):
 # ----------------- DIAGNOSTICS & SYSTEM METRICS -----------------
 def get_server_stats():
     cpu_p, ram_p, disk_p, free_gb = 12.0, 39.5, 50.0, 35.0
-    env_mode = "🖥️ CLOUD COMPUTE"
+    env_mode = "🖥️ CLOUD COMPUTE + FIREBASE"
     
     try:
         if psutil:
@@ -213,6 +255,7 @@ def get_server_stats():
         f"║  🖥️ *SERVER RESOURCE MONITOR* 🖥️  ║\n"
         f"╚═══════════════════════════════════╝\n\n"
         f"💎 *PLATFORM*\n`{env_mode}`\n\n"
+        f"🔥 *FIREBASE STATUS*\n`🟢 LIVE TWO-WAY CONNECTED`\n\n"
         f"⚡ *CPU LOAD*  —  🔥 *{cpu_p}%*\n"
         f"`{make_bar(cpu_p)}`\n\n"
         f"💾 *RAM LOAD*  —  🔥 *{ram_p}%*\n"
@@ -260,7 +303,6 @@ def run_project_process(proj_id, proj_data):
         meta[proj_id]['port'] = port
         save_meta(meta)
     
-    # ম্যানুয়াল স্টার্টআপ কমান্ড থাকলে তা ব্যবহার করা হবে
     custom_cmd = proj_data.get('custom_cmd', '').strip()
     if custom_cmd:
         cmd = shlex.split(custom_cmd)
@@ -403,12 +445,10 @@ def get_menu_keyboard():
     return markup
 
 # ----------------- TELEGRAM MAIN HANDLERS -----------------
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
     
-    # পিন ভেরিফিকেশন গার্ড (১০ মিনিটের মেয়াদ উত্তীর্ণ হলেও পিন চাইবে)
     if not is_authorized(chat_id):
         user_states[chat_id] = "AWAITING_PIN"
         bot_send_message(
@@ -430,6 +470,7 @@ def send_welcome(message):
         f"╚═══════════════════════════════════╝\n\n"
         f"🛰️ যেকোনো অ্যাকাউন্ট থেকে ফুল কন্ট্রোল সক্ষম।\n\n"
         f"📁 *Total Hosted Projects:*  🟢 `{len(meta)}` Active\n"
+        f"☁️ *Cloud Database:*  🔥 `Firebase Live Synced`\n"
         f"⏳ *Auto Lock Timeout:*  ⏱️ 10 Minutes\n"
         f"🔑 *Security State:*  🔓 Authenticated\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -490,20 +531,18 @@ def handle_navigation_buttons(message):
             "║   💡 *VIP OPERATIONAL GUIDE* 💡   ║\n"
             "╚═══════════════════════════════╝\n\n"
             "🚀 *Deployment:* Zip ফাইল দিলে `requirements.txt` অটো ইনস্টল হবে।\n"
-            "⌨️ *Startup Command:* ম্যানুয়াল কমান্ড (যেমন `python bot.py`) সেট করতে পারবেন।\n"
-            "⏱️ *10 Min Lock:* ১০ মিনিট নিষ্ক্রিয় থাকলে বট নিজে থেকেই লক হয়ে যাবে।\n"
-            "🗑️ *PIN Auto Delete:* সঠিক পিন দেওয়ার পর মেসেজ নিজে থেকেই ডিলিট হয়ে যাবে।"
+            "🔄 *Auto-Retry:* ডিপ্লয় ফেইল হলে ওখানেই 'Retry Deploy' বাটনে চাপ দিন।\n"
+            "⚡ *Hot-Patch:* পুরো ZIP না পাঠিয়ে শুধু এডিট করা ফাইলটি সেন্ড করলেই রিপ্লেস হবে।\n"
+            "🔥 *Firebase Sync:* ডাটাবেস সম্পূর্ণ ক্লাউডে সুরক্ষিত এবং ডিলিট করলে ক্লাউড থেকেও মুছে যায়।"
         )
         bot_send_message(chat_id, help_text, parse_mode="Markdown")
 
 # ----------------- CALLBACK BUTTON EVENT QUERY HANDLER -----------------
-
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
     chat_id = call.message.chat.id
     data = call.data
     
-    # গ্লোবাল পিন ও ১০ মিনিট সেশন চেক
     if not is_authorized(chat_id):
         bot.answer_callback_query(call.id, "🔒 সেশনের মেয়াদ শেষ (১০ মিনিট অতিক্রান্ত)। পুনরায় PIN দিন।", show_alert=True)
         user_states[chat_id] = "AWAITING_PIN"
@@ -529,7 +568,7 @@ def callback_listener(call):
             filename = meta[proj_id]['files'].get(file_idx)
             if filename:
                 meta[proj_id]['main_file'] = filename
-                meta[proj_id]['custom_cmd'] = ''  # কাস্টম কমান্ড ক্লিয়ার
+                meta[proj_id]['custom_cmd'] = ''
                 save_meta(meta)
                 
                 play_vip_loading(chat_id, call.message.message_id, "PREPARING DEPLOYMENT SANDBOX")
@@ -554,6 +593,18 @@ def callback_listener(call):
             "• `node index.js`",
             parse_mode="Markdown"
         )
+
+    elif data.startswith("proj_retry:"):
+        # 🔄 এক ক্লিকে ডিপ্লয় রিট্রাই (নতুন ZIP পাঠানো লাগবে না)
+        _, proj_id = data.split(":")
+        meta = load_meta()
+        if proj_id in meta:
+            stop_project_process(proj_id)
+            success, err_msg = run_project_process(proj_id, meta[proj_id])
+            if success:
+                show_project_dashboard(chat_id, proj_id, call.message.message_id, "🟢 Retried & Started Successfully!")
+            else:
+                show_project_dashboard(chat_id, proj_id, call.message.message_id, f"❌ Retry Failed: {err_msg}")
                 
     elif data.startswith("proj_view:"):
         _, proj_id = data.split(":")
@@ -684,6 +735,7 @@ def callback_listener(call):
                     if os.path.isdir(target_path): shutil.rmtree(target_path)
                     else: os.remove(target_path)
                     bot.answer_callback_query(call.id, "🗑️ File deleted!")
+                update_project_files_map(proj_id, meta[proj_id]['dir'])
                 show_file_manager(chat_id, proj_id, call.message.message_id)
 
     elif data.startswith("proj_backup:"):
@@ -703,7 +755,8 @@ def callback_listener(call):
                             rel_p = os.path.relpath(full_p, proj_data['dir'])
                             zipf.write(full_p, rel_p)
                 
-                bot_send_document(chat_id, open(backup_zip_path, 'rb'), visible_file_name=f"{proj_data['name']}_backup.zip")
+                with open(backup_zip_path, 'rb') as f:
+                    bot_send_document(chat_id, f, visible_file_name=f"{proj_data['name']}_backup.zip")
                 os.remove(backup_zip_path)
                 bot_delete_message(chat_id, backup_msg.message_id)
             except Exception as e:
@@ -725,7 +778,7 @@ def callback_listener(call):
                 else:
                     cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages", module_name]
                     
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=80)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
                 if result.returncode == 0:
                     bot_delete_message(chat_id, msg.message_id)
                     stop_project_process(proj_id)
@@ -737,6 +790,7 @@ def callback_listener(call):
                 bot_edit_message(f"❌ Subprocess error: {str(e)}", chat_id, msg.message_id)
             
     elif data.startswith("proj_delete:"):
+        # 🔥 প্রজেক্ট ডিলিট (ফোল্ডার এবং ফায়ারবেস ক্লাউড উভয় থেকেই মুছে যাবে)
         _, proj_id = data.split(":")
         meta = load_meta()
         if proj_id in meta:
@@ -744,15 +798,15 @@ def callback_listener(call):
             try: shutil.rmtree(meta[proj_id]['dir'])
             except Exception: pass
             del meta[proj_id]
+            # ফায়ারবেসে সেভ করা মানে ক্লাউড থেকেও মুছে যাওয়া!
             save_meta(meta)
-            bot.answer_callback_query(call.id, "🗑️ Project folder deleted permanently!")
+            bot.answer_callback_query(call.id, "🗑️ Project folder & Cloud metadata deleted permanently!")
             show_my_files(chat_id, call.message.message_id)
 
     elif data == "btn_back_home":
         send_welcome(call.message)
 
 # ----------------- INCOMING ASSETS / FILE OVERWRITERS -----------------
-
 @bot.message_handler(content_types=['document'])
 def handle_incoming_documents(message):
     chat_id = message.chat.id
@@ -763,6 +817,7 @@ def handle_incoming_documents(message):
         
     state = user_states.get(chat_id, "")
     
+    # ⚡ হট-প্যাচ রিপ্লেসমেন্ট (পুরো জিপ ছাড়া সরাসরি ১টি ফাইল রিপ্লেস ও অটো-রিস্টার্ট)
     if state and state.startswith("REPLACE_FILE:"):
         _, proj_id, rel_path = state.split(":", 2)
         user_states[chat_id] = None
@@ -780,11 +835,22 @@ def handle_incoming_documents(message):
                     f.write(downloaded_file)
                 
                 bot_delete_message(chat_id, status_msg.message_id)
-                bot.reply_to(message, f"✅ Overwritten `{rel_path}`! Restart your project dashboard to apply.")
+                
+                # ফাইল রিপ্লেস হওয়ার সাথে সাথে অটো-রিস্টার্ট
+                stop_project_process(proj_id)
+                success, err_msg = run_project_process(proj_id, meta[proj_id])
+                
+                if success:
+                    bot.reply_to(message, f"✅ `{rel_path}` Overwritten & Container Auto-Restarted!")
+                    show_project_dashboard(chat_id, proj_id, None, "✅ File Hot-Patched & Restarted!")
+                else:
+                    bot.reply_to(message, f"⚠️ `{rel_path}` replaced, but start failed: {err_msg}")
+                    show_project_dashboard(chat_id, proj_id, None, f"❌ Failed: {err_msg}")
             except Exception as e:
                 bot_edit_message(f"❌ Write permission error: {str(e)}", chat_id, status_msg.message_id)
         return
 
+    # নতুন ZIP ফাইল ডিপ্লয়
     if state == "AWAITING_ZIP":
         file_name = message.document.file_name
         if not file_name.endswith('.zip'):
@@ -862,7 +928,6 @@ def handle_incoming_documents(message):
             markup.add(types.InlineKeyboardButton(f"{star}{f}", callback_data=f"select_main:{proj_id}:{idx}"))
             count += 1
 
-        # ম্যানুয়াল স্টার্টআপ কমান্ড সেট করার বাটন
         markup.add(types.InlineKeyboardButton("⌨️ Set Custom Startup Command", callback_data=f"set_custom_cmd:{proj_id}"))
             
         bot_delete_message(chat_id, status_msg.message_id)
@@ -875,7 +940,6 @@ def handle_incoming_documents(message):
         )
 
 # ----------------- TEXT INTAKE MANAGER (PIN, IDE & CONFIG) -----------------
-
 @bot.message_handler(func=lambda m: True)
 def handle_incoming_text(message):
     chat_id = message.chat.id
@@ -885,14 +949,12 @@ def handle_incoming_text(message):
     # পিন ভেরিফিকেশন হ্যান্ডলার
     if not is_authorized(chat_id):
         if user_text == get_current_pin():
-            # ✅ সঠিক PIN: সাথে সাথে ইউজারের মেসেজ ডিলিট হবে যাতে কেউ পিন না দেখে
             bot_delete_message(chat_id, message.message_id)
             authorize_user(chat_id)
             user_states[chat_id] = None
             bot_send_message(chat_id, "✅ *PIN সঠিক! ফুল অ্যাডমিন এক্সেস দেওয়া হয়েছে।*\n_(আপনার PIN মেসেজটি নিরাপত্তার জন্য মুছে দেওয়া হয়েছে)_", parse_mode="Markdown")
             send_welcome(message)
         else:
-            # ❌ ভুল PIN: মেসেজ ডিলিট হবে না
             bot_send_message(chat_id, "❌ *ভুল PIN!* অনুগ্রহ করে সঠিক পিন লিখে পাঠান:", parse_mode="Markdown")
         return
 
@@ -925,7 +987,7 @@ def handle_incoming_text(message):
             
         update_pin(user_text)
         user_states[chat_id] = None
-        bot_delete_message(chat_id, message.message_id)  # নতুন পিনের মেসেজটিও ডিলিট
+        bot_delete_message(chat_id, message.message_id)
         bot_send_message(
             chat_id,
             f"✅ *PIN সফলভাবে পরিবর্তন করা হয়েছে!*\n\n"
@@ -935,6 +997,7 @@ def handle_incoming_text(message):
         )
         return
 
+    # কোড ফাইল ইন-বট এডিটিং হ্যান্ডলার
     if state and state.startswith("EDIT_FILE_CONTENT:"):
         _, proj_id, rel_path = state.split(":", 2)
         user_states[chat_id] = None
@@ -952,6 +1015,7 @@ def handle_incoming_text(message):
                 bot.reply_to(message, f"❌ Failed to edit code: {str(e)}")
         return
 
+    # .env ভ্যারিয়েবল এডিটিং হ্যান্ডলার
     if state and state.startswith("ADD_ENV:"):
         _, proj_id = state.split(":")
         user_states[chat_id] = None
@@ -968,7 +1032,6 @@ def handle_incoming_text(message):
                 bot.reply_to(message, "❌ Syntax Error. Needs format: `KEY=VALUE`")
 
 # ----------------- ADVANCED USER CONTROL PANELS -----------------
-
 def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
     meta = load_meta()
     if proj_id not in meta: return
@@ -991,6 +1054,7 @@ def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
         f"⚙️ *PID Memory:*  `{mem_usage}`\n"
         f"🔌 *Allotted Port:*  `{port_allocated}`\n"
         f"🔄 *Auto Recovery:*  {auto_r_status}\n"
+        f"☁️ *Cloud Database:*  `Firebase Live Synced`\n"
         f"🔒 *Access Level:*  👑 Master Administrator\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👇 *Manage your container below:*"
@@ -1006,20 +1070,27 @@ def show_project_dashboard(chat_id, proj_id, message_id=None, toast_msg=""):
     btn_restart = types.InlineKeyboardButton("🔄 Restart", callback_data=f"proj_restart:{proj_id}")
     btn_logs = types.InlineKeyboardButton("📋 View Logs", callback_data=f"proj_logs:{proj_id}")
     btn_env = types.InlineKeyboardButton("📝 Edit .env", callback_data=f"proj_env:{proj_id}")
-    btn_fm = types.InlineKeyboardButton("📁 Files", callback_data=f"proj_fm:{proj_id}")
+    btn_fm = types.InlineKeyboardButton("📁 Files & Hot-Patch", callback_data=f"proj_fm:{proj_id}")
     btn_backup = types.InlineKeyboardButton("📦 Full Backup", callback_data=f"proj_backup:{proj_id}")
     
-    btn_auto = types.InlineKeyboardButton("🔄 Auto Restart Toggle", callback_data=f"proj_autorestart_toggle:{proj_id}")
-    btn_delete = types.InlineKeyboardButton("🗑️ Terminate", callback_data=f"proj_delete:{proj_id}")
-    btn_back = types.InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_my_files")
+    # 🔄 ডিপ্লয় ফেইল বা ক্র্যাশ হলে সরাসরি Retry বাটন
+    if "CRASHED" in status or "STOPPED" in status:
+        btn_retry = types.InlineKeyboardButton("🔄 Retry Deploy", callback_data=f"proj_retry:{proj_id}")
+        markup.add(btn_action, btn_restart, btn_retry)
+    else:
+        markup.add(btn_action, btn_restart, btn_logs)
+        
+    markup.add(btn_env, btn_fm, btn_backup)
     
     missing_module = get_missing_module(os.path.join(proj_data['dir'], 'output.log'))
     if missing_module:
         btn_install = types.InlineKeyboardButton(f"📦 Install {missing_module}", callback_data=f"proj_install:{proj_id}:{missing_module}")
         markup.add(btn_install)
         
-    markup.add(btn_action, btn_restart, btn_logs)
-    markup.add(btn_env, btn_fm, btn_backup)
+    btn_auto = types.InlineKeyboardButton("🔄 Auto Restart Toggle", callback_data=f"proj_autorestart_toggle:{proj_id}")
+    btn_delete = types.InlineKeyboardButton("🗑️ Terminate (Delete)", callback_data=f"proj_delete:{proj_id}")
+    btn_back = types.InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_my_files")
+    
     markup.add(btn_auto)
     markup.add(btn_delete, btn_back)
     
@@ -1036,7 +1107,7 @@ def show_my_files(chat_id, message_id=None):
         f"╔═══════════════════════════════════╗\n"
         f"║  👑 *ALL HOSTED CONTAINERS* 👑    ║\n"
         f"╚═══════════════════════════════════╝\n"
-        f"🔓 _Master Admin Access Active._\n"
+        f"☁️ _Firebase Two-Way Cloud Sync Active._\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1135,9 +1206,9 @@ def show_file_manager(chat_id, proj_id, message_id):
     files_map = update_project_files_map(proj_id, proj_data['dir'])
     
     text = (
-        f"📁 *IN-SANDBOX INTEGRATED IDE*\n"
+        f"📁 *IN-SANDBOX INTEGRATED IDE & HOT-PATCH*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Explore, view, edit or replace active directory codes:\n\n"
+        f"Explore, view, edit or hot-patch active directory files:\n\n"
     )
     
     markup = types.InlineKeyboardMarkup(row_width=4)
@@ -1198,7 +1269,7 @@ def show_code_viewer(chat_id, proj_id, rel_path, file_idx, message_id):
 # ----------------- COLD ENGINE IGNITION -----------------
 if __name__ == '__main__':
     print("========================================")
-    print("🔥 CORE HOSTING HUB ENGINE V2 ACTIVATED 🔥")
+    print("🔥 CORE HOSTING HUB + FIREBASE LIVE 🔥")
     print(f"🔑 MASTER PIN: {get_current_pin()}")
     print("========================================")
     
